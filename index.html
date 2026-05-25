@@ -264,6 +264,7 @@
                             <th class="p-3 w-12 text-center font-bold">No.</th>
                             <th class="p-3 font-bold w-1/3">名前 <span class="text-xs font-normal text-gray-500">(必須)</span></th>
                             <th class="p-3 font-bold">係・当番名 <span class="text-xs font-normal text-gray-500">(任意)</span></th>
+                            <th class="p-3 font-bold text-center w-40">今のポイント</th>
                         </tr>
                     </thead>
                     <tbody id="settingsTableBody">
@@ -639,6 +640,78 @@
             return `${y}-${m}-${d}`;
         }
 
+        // --- 学期(年度)判定 ---
+        // 日本の学校年度: 4月1日〜翌年3月31日
+        // 「今学期(=今年度)の開始日」を返す
+        function getCurrentSchoolYearStartKey() {
+            const today = new Date();
+            const y = today.getFullYear();
+            const m = today.getMonth() + 1; // 1〜12
+            const startYear = (m >= 4) ? y : y - 1;
+            return `${startYear}-04-01`;
+        }
+
+        // --- 祝日判定(日本) ---
+        // 春分・秋分は近似式(1900〜2099に有効)
+        function getSpringEquinoxDay(year) {
+            // 春分の日: 3月の日付
+            if (year <= 1979) return Math.floor(20.8357 + 0.242194 * (year - 1980) - Math.floor((year - 1980) / 4));
+            if (year <= 2099) return Math.floor(20.8431 + 0.242194 * (year - 1980) - Math.floor((year - 1980) / 4));
+            return 20;
+        }
+        function getAutumnEquinoxDay(year) {
+            // 秋分の日: 9月の日付
+            if (year <= 1979) return Math.floor(23.2588 + 0.242194 * (year - 1980) - Math.floor((year - 1980) / 4));
+            if (year <= 2099) return Math.floor(23.2488 + 0.242194 * (year - 1980) - Math.floor((year - 1980) / 4));
+            return 23;
+        }
+        // n回目の指定曜日の日(ハッピーマンデー用)。例: 1月の第2月曜日 = nthWeekday(year, 1, 1, 2)
+        function nthWeekday(year, month, weekday, n) {
+            // monthは1〜12、weekdayは0(日)〜6(土)
+            const first = new Date(year, month - 1, 1);
+            const firstWeekday = first.getDay();
+            let day = 1 + ((weekday - firstWeekday + 7) % 7) + (n - 1) * 7;
+            return day;
+        }
+
+        // その日が日本の祝日かどうか(土日は別途判定)
+        function isJapaneseHoliday(date) {
+            const y = date.getFullYear();
+            const m = date.getMonth() + 1;
+            const d = date.getDate();
+
+            // 固定祝日
+            if (m === 1 && d === 1) return true;   // 元日
+            if (m === 2 && d === 11) return true;  // 建国記念の日
+            if (m === 2 && d === 23) return true;  // 天皇誕生日(2020年以降)
+            if (m === 4 && d === 29) return true;  // 昭和の日
+            if (m === 5 && d === 3) return true;   // 憲法記念日
+            if (m === 5 && d === 4) return true;   // みどりの日
+            if (m === 5 && d === 5) return true;   // こどもの日
+            if (m === 8 && d === 11) return true;  // 山の日
+            if (m === 11 && d === 3) return true;  // 文化の日
+            if (m === 11 && d === 23) return true; // 勤労感謝の日
+
+            // ハッピーマンデー
+            if (m === 1 && d === nthWeekday(y, 1, 1, 2)) return true;   // 成人の日(1月第2月曜)
+            if (m === 7 && d === nthWeekday(y, 7, 1, 3)) return true;   // 海の日(7月第3月曜)
+            if (m === 9 && d === nthWeekday(y, 9, 1, 3)) return true;   // 敬老の日(9月第3月曜)
+            if (m === 10 && d === nthWeekday(y, 10, 1, 2)) return true; // スポーツの日(10月第2月曜)
+
+            // 春分・秋分
+            if (m === 3 && d === getSpringEquinoxDay(y)) return true;
+            if (m === 9 && d === getAutumnEquinoxDay(y)) return true;
+
+            return false;
+        }
+
+        // 土日または祝日か
+        function isHolidayOrWeekend(date) {
+            const day = date.getDay();
+            if (day === 0 || day === 6) return true; // 日土
+            return isJapaneseHoliday(date);
+        }
+
         // --- ロジック ---
         function calculateLevel(points) {
             const levels = Object.keys(LEVEL_THRESHOLDS).map(Number).sort((a, b) => b - a);
@@ -689,12 +762,15 @@
         // クラスパーフェクト判定のキャッシュ（renderCheckViewで事前計算）
         let _cachedClassPerfect = false;
 
-        function getStudentStats(student) {
+        function getStudentStats(student, fromDateKey) {
             let totalPoints = 0;
             const sortedDates = Object.keys(activityData).sort();
             let currentStreak = 0;
 
             sortedDates.forEach(dateKey => {
+                // 期間指定がある場合はそれ以降のみ集計
+                if (fromDateKey && dateKey < fromDateKey) return;
+
                 const dayRecord = activityData[dateKey][student.id];
                 if (!dayRecord) return; 
 
@@ -829,6 +905,7 @@
             } else {
                 document.getElementById('view-check').classList.add('hidden');
                 document.getElementById('view-settings').classList.remove('hidden');
+                initSettingsTable(); // 最新ポイントを反映
             }
         }
 
@@ -837,10 +914,19 @@
             const tbody = document.getElementById('settingsTableBody');
             tbody.innerHTML = '';
 
+            const termStartKey = getCurrentSchoolYearStartKey();
+
             for (let i = 0; i < MAX_STUDENTS; i++) {
                 // 安全策
                 if (!studentList[i]) studentList[i] = { id: i + 1, name: "", role: "", iconSeed: i + 1, lastSeededDate: "", achievements: [] };
                 const student = studentList[i];
+
+                // 今学期のポイントを取得(名前のある児童のみ計算、空欄なら0)
+                let termPoints = 0;
+                if (student.name && student.name.trim() !== "") {
+                    const stats = getStudentStats(student, termStartKey);
+                    termPoints = stats.totalPoints;
+                }
 
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
@@ -857,6 +943,7 @@
                         <input type="text" placeholder="係名" value="${escHtml(student.role || '')}" 
                                onchange="updateStudent(${i}, 'role', this.value)">
                     </td>
+                    <td class="text-center font-bold text-indigo-700 text-lg">${termPoints}<span class="text-xs font-normal text-gray-500 ml-1">P</span></td>
                 `;
                 tbody.appendChild(tr);
             }
@@ -1276,6 +1363,25 @@
             if (count === 0) {
                 container.innerHTML = `<div class="col-span-full text-center py-12 glass rounded-xl"><p class="text-xl font-bold text-gray-600 mb-2">生徒が登録されていません</p><button onclick="switchTab('settings')" class="mt-4 bg-indigo-600 text-white px-6 py-2 rounded-full shadow-lg">設定画面へ</button></div>`;
                 return;
+            }
+
+            // 土日祝の自動「一括休」セット(その日が初回表示時のみ。手動で外せば再セットしない)
+            if (isHolidayOrWeekend(currentDate)) {
+                if (!activityData[dateKey]) activityData[dateKey] = {};
+                if (!activityData[dateKey].__autoHoliday) {
+                    // 初回のみ全員を欠席に
+                    activeStudents.forEach(s => {
+                        if (!activityData[dateKey][s.id]) {
+                            activityData[dateKey][s.id] = { toban: false, shukudai: false, absent: true };
+                        } else {
+                            activityData[dateKey][s.id].absent = true;
+                            activityData[dateKey][s.id].toban = false;
+                            activityData[dateKey][s.id].shukudai = false;
+                        }
+                    });
+                    activityData[dateKey].__autoHoliday = true;
+                    saveActivityData();
+                }
             }
 
             // 全員休ボタン状態
